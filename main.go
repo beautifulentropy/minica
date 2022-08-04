@@ -36,15 +36,15 @@ type issuer struct {
 	cert *x509.Certificate
 }
 
-func getIssuer(keyFile, certFile string) (*issuer, error) {
+func getIssuer(keyFile, certFile string, backdate time.Duration) (*issuer, error) {
 	keyContents, keyErr := ioutil.ReadFile(keyFile)
 	certContents, certErr := ioutil.ReadFile(certFile)
 	if os.IsNotExist(keyErr) && os.IsNotExist(certErr) {
-		err := makeIssuer(keyFile, certFile)
+		err := makeIssuer(keyFile, certFile, backdate)
 		if err != nil {
 			return nil, err
 		}
-		return getIssuer(keyFile, certFile)
+		return getIssuer(keyFile, certFile, 0)
 	} else if keyErr != nil {
 		return nil, fmt.Errorf("%s (but %s exists)", keyErr, certFile)
 	} else if certErr != nil {
@@ -90,12 +90,12 @@ func readCert(certContents []byte) (*x509.Certificate, error) {
 	return x509.ParseCertificate(block.Bytes)
 }
 
-func makeIssuer(keyFile, certFile string) error {
+func makeIssuer(keyFile, certFile string, backdate time.Duration) error {
 	key, err := makeKey(keyFile)
 	if err != nil {
 		return err
 	}
-	_, err = makeRootCert(key, certFile)
+	_, err = makeRootCert(key, certFile, backdate)
 	if err != nil {
 		return err
 	}
@@ -126,7 +126,7 @@ func makeKey(filename string) (*rsa.PrivateKey, error) {
 	return key, nil
 }
 
-func makeRootCert(key crypto.Signer, filename string) (*x509.Certificate, error) {
+func makeRootCert(key crypto.Signer, filename string, backdate time.Duration) (*x509.Certificate, error) {
 	serial, err := rand.Int(rand.Reader, big.NewInt(math.MaxInt64))
 	if err != nil {
 		return nil, err
@@ -140,8 +140,8 @@ func makeRootCert(key crypto.Signer, filename string) (*x509.Certificate, error)
 			CommonName: "minica root ca " + hex.EncodeToString(serial.Bytes()[:3]),
 		},
 		SerialNumber: serial,
-		NotBefore:    time.Now(),
-		NotAfter:     time.Now().AddDate(100, 0, 0),
+		NotBefore:    time.Now().Add(-backdate),
+		NotAfter:     time.Now().AddDate(100, 0, 0).Add(backdate),
 
 		SubjectKeyId:          skid,
 		AuthorityKeyId:        skid,
@@ -213,7 +213,7 @@ func calculateSKID(pubKey crypto.PublicKey) ([]byte, error) {
 	return skid[:], nil
 }
 
-func sign(iss *issuer, domains []string, ipAddresses []string) (*x509.Certificate, error) {
+func sign(iss *issuer, domains []string, ipAddresses []string, backdate time.Duration) (*x509.Certificate, error) {
 	var cn string
 	if len(domains) > 0 {
 		cn = domains[0]
@@ -246,7 +246,7 @@ func sign(iss *issuer, domains []string, ipAddresses []string) (*x509.Certificat
 			CommonName: cn,
 		},
 		SerialNumber: serial,
-		NotBefore:    time.Now(),
+		NotBefore:    time.Now().Add(-backdate),
 		// Set the validity period to 2 years and 30 days, to satisfy the iOS and
 		// macOS requirements that all server certificates must have validity
 		// shorter than 825 days:
@@ -289,6 +289,8 @@ func main2() error {
 	var caCert = flag.String("ca-cert", "minica.pem", "Root certificate filename, PEM encoded.")
 	var domains = flag.String("domains", "", "Comma separated domain names to include as Server Alternative Names.")
 	var ipAddresses = flag.String("ip-addresses", "", "Comma separated IP addresses to include as Server Alternative Names.")
+	var backdateCACert = flag.Duration("backdate-ca-cert", 0, "Backdate the CA certificate's 'NotBefore' date by the specified duration. (1s, 1h, etc.)")
+	var backdateCert = flag.Duration("backdate-cert", 0, "Backdate the server certificate's 'NotBefore' date by the specified duration. (1s, 1h, etc.)")
 	flag.Usage = func() {
 		fmt.Fprintf(os.Stderr, "Usage of %s:\n", os.Args[0])
 		fmt.Fprintf(os.Stderr, `
@@ -336,10 +338,10 @@ will not overwrite existing keys or certificates.
 			os.Exit(1)
 		}
 	}
-	issuer, err := getIssuer(*caKey, *caCert)
+	issuer, err := getIssuer(*caKey, *caCert, *backdateCACert)
 	if err != nil {
 		return err
 	}
-	_, err = sign(issuer, domainSlice, ipSlice)
+	_, err = sign(issuer, domainSlice, ipSlice, *backdateCert)
 	return err
 }
